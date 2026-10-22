@@ -1,0 +1,33 @@
+{
+  "date": "2026-10-22",
+  "version": "0.1.1",
+  "versionCode": 2,
+  "appName": "unleashed",
+  "package": "com.horacio.unleashed",
+  "repository": "https://github.com/horacioMartinez/chatgpt-unleashed",
+  "releaseBuild": "passed",
+  "unitTests": {
+    "tests": 97,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "releaseLint": {
+    "Fatal": 0,
+    "Error": 0,
+    "Warning": 25
+  },
+  "releaseSignature": "verified; same certificate as existing unleashed builds",
+  "debuggable": false,
+  "productionDebugListener": false,
+  "nativeLibraries": false,
+  "apkAsset": "unleashed.apk",
+  "apkBytes": 164520,
+  "apkSha256": "1fb6f036963fff4a7c4cc000fd724d19626676963def5f25656455a6729f4dd4",
+  "liveDeviceChecks": "Not run for this release; no phone state changed.",
+  "links": {
+    "appSetupGuide": "https://github.com/horacioMartinez/chatgpt-unleashed",
+    "readmeRelease": "https://github.com/horacioMartinez/chatgpt-unleashed/releases/latest",
+    "readmeDemo": "assets/unleashed-demo.gif"
+  }
+}

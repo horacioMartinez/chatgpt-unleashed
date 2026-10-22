@@ -1,0 +1,27 @@
+<resources>
+    <string name="chatgpt_working">ChatGPT is working</string>
+    <string name="chatgpt_waiting_for_authentication">ChatGPT is waiting for authentication</string>
+    <string name="show_task_status_overlay">Show task status over other apps</string>
+    <string name="task_status_overlay_help">Tap Cancel on the banner to cancel the current task while keeping the connection available. Authentication dialogs may block taps; protected screens may hide the banner.</string>
+    <string name="cancel_current_phone_task">Cancel</string>
+    <string name="cancel_current_phone_task_description">Cancel the current ChatGPT phone task</string>
+    <string name="compact_bubble_working">ChatGPT · Working</string>
+    <string name="compact_bubble_waiting">ChatGPT · Waiting for unlock</string>
+    <string name="phone_access_notification_title">Phone access</string>
+    <string name="phone_access_notification_unlock">Waiting for unlock</string>
+    <string name="diagnostics_title">Diagnostics</string>
+    <string name="diagnostics_help">Technical events only. Message contents, screenshots, and credentials are not recorded. Export includes all retained events and basic app/device information.</string>
+    <string name="diagnostics_errors_only">Errors only</string>
+    <string name="diagnostics_export">Export report</string>
+    <string name="diagnostics_refresh">Refresh</string>
+    <string name="diagnostics_clear">Clear history</string>
+    <string name="diagnostics_back">Back</string>
+    <string name="diagnostics_clear_confirmation">Clear diagnostic history on this phone? Previously exported reports will remain.</string>
+    <string name="diagnostics_unavailable">Diagnostic history is unavailable. Check available device storage and restart the app.</string>
+    <string name="diagnostics_summary">Recent events shown: %1$d. History rotates automatically at 2 MiB.</string>
+    <string name="diagnostics_dropped">Logging was interrupted. Events not saved: %1$d.</string>
+    <string name="diagnostics_empty">No matching technical events recorded.</string>
+    <string name="diagnostics_exported">Diagnostics report saved</string>
+    <string name="diagnostics_export_failed">Could not save the report. Choose another destination and try again.</string>
+    <string name="accessibility_description">Lets ChatGPT read visible screen content, take screenshots and operate apps for tasks you request. Screen observations are sent through your configured ChatGPT connection. You can cancel tasks or disable access at any time. Password fields are redacted; protected screens may be unavailable.</string>
+</resources>

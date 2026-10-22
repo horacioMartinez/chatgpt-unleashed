@@ -1,0 +1,5 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
+    <application android:name=".DevelopmentApplication" android:label="unleashed (dev)" tools:replace="android:name,android:label">
+        <service android:name=".PhoneAccessibilityService" android:label="unleashed (dev) phone control" tools:replace="android:label" />
+    </application>
+</manifest>

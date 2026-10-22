@@ -1,0 +1,17 @@
+/.gradle/
+/local.properties
+**/build/
+*.iml
+/.idea/
+__pycache__/
+*.py[cod]
+
+/artifacts/
+/verification/*.png
+
+# Keep app signing keys and passwords out of source control.
+*.jks
+*.keystore
+*.p12
+*.pfx
+*signing.properties
