@@ -1,4 +1,4 @@
-### Enable ChatGPT app to control your phone
+### Let the ChatGPT app control your phone
 
 <p align="center">
   <img src="assets/unleashed-demo.gif" alt="Demo: ChatGPT sends a WhatsApp message using unleashed" width="240">
@@ -53,7 +53,9 @@ Log in to [OpenAI Platform](https://platform.openai.com/), then follow these ste
 
 3. Open unleashed and tap **Connect ChatGPT**. Enter the Tunnel ID and Secret key, then connect. Check that the connection succeeds.
 
-4. Open [ChatGPT Plugins](https://chatgpt.com/plugins) and choose **Add → Add custom MCP server**:
+4. Open [https://chatgpt.com/plugins](https://chatgpt.com/plugins) in your browser.
+
+   Choose **Add → Add custom MCP server**:
 
    - Name: `unleashed`
    - Connection: Select **Tunnel** and paste your Tunnel ID.
