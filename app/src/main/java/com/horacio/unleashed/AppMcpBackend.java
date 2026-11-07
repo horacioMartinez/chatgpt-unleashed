@@ -20,15 +20,17 @@ public final class AppMcpBackend implements McpRouter.Backend {
 
   static void restoreAfterCancellation() throws Exception {
     long generation = CONTROL.generation();
-    BackendController.service()
-        .returnToChatGPT(
-            () -> {
-              if (!CONTROL.stopped()
-                  || CONTROL.generation() != generation
-                  || !BackendController.allowed())
-                throw new java.util.concurrent.CancellationException(
-                    "Cancellation navigation superseded");
-            });
+    PhoneOperations.run(
+        () ->
+            BackendController.service()
+                .returnToChatGPT(
+                    () -> {
+                      if (!CONTROL.stopped()
+                          || CONTROL.generation() != generation
+                          || !BackendController.allowed())
+                        throw new java.util.concurrent.CancellationException(
+                            "Cancellation navigation superseded");
+                    }));
   }
 
   static void accessibilityAuthenticationChanged() {
@@ -182,7 +184,7 @@ public final class AppMcpBackend implements McpRouter.Backend {
         expectedPackage,
         () -> {
           try {
-            return readScreen();
+            return PhoneOperations.run(this::readScreen);
           } catch (Exception error) {
             Diagnostics.record(
                 DiagnosticEvent.problem(

@@ -21,6 +21,54 @@ public class AccessibilityAuthenticationTest {
                                 "Fingerprint required: wait instead of aborting")))));
   }
 
+  @Test
+  public void authenticationProseDoesNotPauseReadableApps() throws Exception {
+    for (String pkg : new String[] {"com.android.chrome", APP, "com.android.systemui"}) {
+      for (String phrase :
+          new String[] {
+            "How to unlock with your fingerprint",
+            "Use your biometric to continue",
+            "Fingerprint required",
+            "Authentication required",
+            "App locked",
+            "Usa tu huella",
+            "Aplicación bloqueada",
+            "Verifica tu identidad"
+          }) {
+        for (String field : new String[] {"text", "description"}) {
+          JSONObject prose = node(pkg, WINDOW, "").put(field, phrase);
+          JSONObject observation =
+              screen(true, APP, new JSONArray().put(node(APP, WINDOW, "Home")).put(prose));
+          AuthenticationGate gate = gate();
+          gate.observeAccessibility(observation);
+          assertFalse(pkg + ": " + field + ": " + phrase, gate.waiting());
+          assertFalse(gate.state().getBoolean("keepWaiting"));
+        }
+      }
+    }
+  }
+
+  @Test
+  public void systemAuthenticationControlsStillPauseWithoutReadablePromptText() throws Exception {
+    for (String id :
+        new String[] {
+          "biometric_prompt",
+          "biometric_icon",
+          "fingerprint_icon",
+          "credential_input",
+          "pinentry",
+          "passwordentry"
+        }) {
+      JSONObject control =
+          node("com.android.systemui", 4, "").put("id", "com.android.systemui:id/" + id);
+      JSONObject observation = unlocked();
+      observation.getJSONArray("elements").put(control);
+      AuthenticationGate gate = gate();
+      gate.observeAccessibility(observation);
+      assertTrue(id, gate.waiting());
+    }
+  }
+
   private static final String APP = "com.mercadopago.wallet";
   private static final int WINDOW = 3;
 

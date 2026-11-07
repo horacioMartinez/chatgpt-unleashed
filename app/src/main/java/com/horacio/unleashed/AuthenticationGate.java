@@ -1,6 +1,5 @@
 package com.horacio.unleashed;
 
-import java.text.Normalizer;
 import java.util.Locale;
 import java.util.function.LongSupplier;
 import org.json.JSONArray;
@@ -252,27 +251,10 @@ public final class AuthenticationGate {
       JSONObject e = elements.optJSONObject(i);
       if (e == null) continue;
       String id = e.optString("id").toLowerCase(Locale.ROOT);
-      String text =
-          Normalizer.normalize(
-                  e.optString("text") + " " + e.optString("description"), Normalizer.Form.NFD)
-              .replaceAll("\\p{M}", "")
-              .toLowerCase(Locale.ROOT);
+      // App prose is not evidence of a prompt; only recognize system authentication controls.
       if (e.optString("package").equals("com.android.systemui")
           && id.matches(
               ".*(biometric_prompt|biometric_icon|fingerprint_icon|credential_input|pinentry|passwordentry).*"))
-        return true;
-      if (e.optString("package").equals("com.android.settings")
-          || e.optString("package").equals("com.openai.chatgpt")
-          || id.matches(".*(message_text|comment_text|message_body).*")) continue;
-      if (text.matches(
-          ".*(unlock with|use your|scan your|confirm your|verify your|touch the).*"
-              + "(fingerprint|fingerprint sensor|biometric).*")) return true;
-      if (text.matches(
-          ".*(usa tu|usar tu|usa la|usar la|ingresa con|ingresar con|accede con|toca el|confirma"
-              + " tu).*(huella|sensor de huellas|biometr).*")) return true;
-      if (text.matches(
-          ".*(fingerprint required|authentication required|app locked|aplicacion bloqueada|verifica"
-              + " tu identidad|verifica que eres tu|confirma tu identidad|valida tu identidad).*"))
         return true;
     }
     return false;

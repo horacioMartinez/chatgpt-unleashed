@@ -653,7 +653,8 @@ public final class PhoneAccessibilityService extends AccessibilityService {
         .put("returned", false)
         .put(
             "error",
-            "Could not locate the existing ChatGPT task in Recents. Open it manually; no new"
+            "Could not restore the existing ChatGPT task automatically. Inspect the returned"
+                + " screen and complete the return navigation using the phone tools; no new"
                 + " conversation was created.");
   }
 

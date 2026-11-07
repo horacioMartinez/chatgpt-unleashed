@@ -355,7 +355,11 @@ public class McpRouterTest {
     assertTrue(value.getBoolean("returned"));
     assertEquals(1, backend.returns);
     assertEquals(0, backend.actions);
-    assertEquals(0, backend.observations);
+    assertEquals(1, backend.observations);
+    assertTrue(value.getJSONObject("screen").has("elements"));
+    assertTrue(value.getString("nextAction").contains("Neither confirms the conversation"));
+    assertTrue(value.getString("nextAction").startsWith("Quick check:"));
+    assertTrue(value.getString("nextAction").contains("answer immediately without extra reads"));
   }
 
   @Test
@@ -372,6 +376,8 @@ public class McpRouterTest {
     assertFalse(value.getBoolean("returned"));
     assertEquals(0, backend.returns);
     assertEquals(0, backend.actions);
+    assertEquals(0, backend.observations);
+    assertFalse(value.has("nextAction"));
   }
 
   @Test
@@ -385,8 +391,25 @@ public class McpRouterTest {
     assertTrue(result.getBoolean("isError"));
     assertTrue(value.getBoolean("finished"));
     assertFalse(value.getBoolean("returned"));
+    assertTrue(value.has("screen"));
+    assertTrue(value.getString("nextAction").contains("from whatever screen is visible"));
     assertEquals(1, backend.finishes);
     assertEquals(1, backend.failures);
+  }
+
+  @Test
+  public void unavailableFinishScreenPreservesReturnResultAndRecoveryInstructions() throws Exception {
+    Fake backend = new Fake();
+    backend.readFails = true;
+    JSONObject result =
+        new McpRouter(backend).handle(finish(new JSONObject())).getJSONObject("result");
+    JSONObject value =
+        new JSONObject(result.getJSONArray("content").getJSONObject(0).getString("text"));
+    assertFalse(result.getBoolean("isError"));
+    assertTrue(value.getBoolean("returned"));
+    assertTrue(value.getBoolean("screenUnavailable"));
+    assertTrue(value.getString("nextAction").contains("phone_read_screen or phone_screenshot"));
+    assertEquals(1, backend.finishes);
   }
 
   @Test

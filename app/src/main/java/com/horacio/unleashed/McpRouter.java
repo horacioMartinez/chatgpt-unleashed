@@ -17,6 +17,20 @@ public final class McpRouter {
       "Restoring ChatGPT: Before navigating within ChatGPT, identify the active conversation."
           + " When the task finishes or stops, return to that conversation and scroll to the bottom"
           + " so the latest response is visible. Do not create a new conversation.";
+  private static final String RETURN_VERIFICATION_GUIDANCE =
+      "Quick check: inspect the returned screen once before answering. If it already shows the"
+          + " original ChatGPT conversation at the bottom, answer immediately without extra reads,"
+          + " screenshots or navigation. Otherwise, from whatever screen is visible, use only the"
+          + " minimum navigation needed to restore that conversation and its latest messages. Use"
+          + " phone_read_screen or phone_screenshot only if the returned observation is insufficient;"
+          + " use the fresh screens returned by phone_action to check progress. Keep recovery brief;"
+          + " avoid redundant checks and repeated unsuccessful retries. finished=true means the"
+          + " task indicator was cleared; returned=true only means ChatGPT was detected in the"
+          + " foreground. Neither confirms the conversation or scroll position. Do not create a"
+          + " new conversation or send a message. If you perform more phone actions, call"
+          + " phone_finish_task again and make the same quick check of its returned screen. If"
+          + " restoration remains impossible after a brief attempt, explain that to the owner; do"
+          + " not claim it succeeded. Never resume an owner-cancelled task.";
 
   public interface Backend {
     JSONObject action(JSONObject args) throws Exception;
@@ -110,7 +124,7 @@ public final class McpRouter {
               new JSONObject()
                   .put("protocolVersion", version)
                   .put("capabilities", object("{\"tools\":{}}"))
-                  .put("serverInfo", object("{\"name\":\"unleashed\",\"version\":\"0.1.1\"}"))
+                  .put("serverInfo", object("{\"name\":\"unleashed\",\"version\":\"0.1.2\"}"))
                   .put(
                       "instructions",
                       "Control the owner's Android phone only for the current explicit request."
@@ -122,7 +136,11 @@ public final class McpRouter {
                           + " observations can contain private data. Check phone_status for backend"
                           + " availability. Before your final answer, call phone_finish_task to"
                           + " restore the existing ChatGPT conversation. Do this after success or a"
-                          + " failed/aborted phone task. If the user explicitly wants another app"
+                          + " failed/aborted phone task. Make a quick check of its returned screen;"
+                          + " if needed, briefly complete remaining return navigation from whatever"
+                          + " screen is visible. Avoid redundant observations when already restored."
+                          + " If the user explicitly"
+                          + " wants another app"
                           + " left open, pass returnToChatGPT=false. If a tool reports"
                           + " status=cancelled because the owner pressed Cancel, end that task"
                           + " immediately and call phone_finish_task to acknowledge cancellation."
@@ -181,6 +199,7 @@ public final class McpRouter {
     JSONObject result = null;
     Exception failure = null;
     boolean began = false;
+    boolean acquired = false;
     try {
       JSONObject cancellation = backend.taskCancellation();
       if (cancellation != null) {
@@ -197,6 +216,14 @@ public final class McpRouter {
       }
       backend.toolStarted();
       began = true;
+      // Register the task lease before queuing so Cancel also revokes waiting operations.
+      // Authentication waits acquire the same lock only for each probe, never while sleeping.
+      if (!name.equals("phone_wait_for_authentication")) {
+        PhoneOperations.acquire();
+        acquired = true;
+        cancellation = backend.taskCancellation();
+        if (cancellation != null) return result = cancelledResult(cancellation);
+      }
       task = backend.diagnosticTaskId();
       record(DiagnosticEvent.started(DiagnosticEvent.Area.TOOL, operation, trace, task));
       result = performTool(name, args);
@@ -209,17 +236,21 @@ public final class McpRouter {
       failure = error;
       throw error;
     } finally {
-      record(
-          DiagnosticEvent.completed(
-              DiagnosticEvent.Area.TOOL,
-              operation,
-              trace,
-              task,
-              (System.nanoTime() - started) / 1_000_000L,
-              result,
-              failure));
-      if (began) backend.toolCompleted();
-      if (failure != null || (result != null && result.optBoolean("isError"))) backend.toolFailed();
+      try {
+        record(
+            DiagnosticEvent.completed(
+                DiagnosticEvent.Area.TOOL,
+                operation,
+                trace,
+                task,
+                (System.nanoTime() - started) / 1_000_000L,
+                result,
+                failure));
+        if (began) backend.toolCompleted();
+        if (failure != null || (result != null && result.optBoolean("isError"))) backend.toolFailed();
+      } finally {
+        if (acquired) PhoneOperations.release();
+      }
     }
   }
 
@@ -303,6 +334,17 @@ public final class McpRouter {
         } finally {
           backend.authenticationTaskFinished();
         }
+        if (args.optBoolean("returnToChatGPT", true)) {
+          try {
+            value.put("screen", backend.readScreen());
+          } catch (java.util.concurrent.CancellationException | InterruptedException stopped) {
+            throw stopped;
+          } catch (Exception unavailable) {
+            // Preserve the navigation result so the agent can recover with a fresh observation.
+            value.put("screenUnavailable", true);
+          }
+          value.put("nextAction", RETURN_VERIFICATION_GUIDANCE);
+        }
         break;
       default:
         throw new IllegalArgumentException("Unknown tool: " + name);
@@ -334,7 +376,10 @@ public final class McpRouter {
 
   private static String finishReminder() {
     return "Continue the task if needed. When finished, call phone_finish_task before your final"
-        + " answer to return to the existing ChatGPT conversation. Set returnToChatGPT=false only"
+        + " answer to return to the existing ChatGPT conversation. Make a quick check of its"
+        + " returned screen; if already restored, answer without extra phone calls. Otherwise use"
+        + " minimal return navigation from the current screen, then call phone_finish_task again"
+        + " after corrective actions and make the same quick check. Set returnToChatGPT=false only"
         + " if the user explicitly asked to leave another app open. An authentication prompt is a"
         + " pause: use phone_wait_for_authentication until the owner unlocks, then resume; do not"
         + " finish or dismiss the prompt just because fingerprint input is needed. "
@@ -405,10 +450,13 @@ public final class McpRouter {
     JSONObject finish =
         tool(
             "phone_finish_task",
-            "Required last step of a phone task before answering the user, including on failure or"
-                + " cancellation. By default restores the existing ChatGPT Android task and"
-                + " verifies it is foreground, preserving the conversation without launching a new"
-                + " chat. Call only after all phone work is done. Pass returnToChatGPT=false only"
+            "Required when the requested phone work is done, including on failure or cancellation."
+                + " By default attempts to restore the existing ChatGPT Android task and returns"
+                + " a fresh screen observation. Make a quick check: if the original conversation"
+                + " is already visible at the bottom, answer without extra phone calls. Otherwise"
+                + " use minimal navigation from whatever screen is visible, avoiding redundant"
+                + " observations and repeated unsuccessful retries. After corrective actions, call"
+                + " this tool again and make the same quick check. Pass returnToChatGPT=false only"
                 + " when the user explicitly asks to leave another app open. Does not send any"
                 + " message. "
                 + CHATGPT_UI_GUIDANCE,
