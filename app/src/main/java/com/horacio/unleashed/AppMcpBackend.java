@@ -33,17 +33,7 @@ public final class AppMcpBackend implements McpRouter.Backend {
                     }));
   }
 
-  static void accessibilityAuthenticationChanged() {
-    PhoneAccessibilityService service = PhoneAccessibilityService.current();
-    if (service == null || !BackendController.allowed()) return;
-    try {
-      observeAccessibility(service.readScreen(() -> {}));
-    } catch (Exception ignored) {
-      /* A missing or protected screen is not evidence of unlock. */
-    }
-  }
-
-  private static JSONObject observeAccessibility(JSONObject screen) throws Exception {
+  static JSONObject observeAccessibility(JSONObject screen) throws Exception {
     AUTH.observeAccessibility(screen);
     screen.remove("device");
     JSONObject authentication = AUTH.state();
@@ -53,6 +43,7 @@ public final class AppMcpBackend implements McpRouter.Backend {
         .put("authentication", authentication)
         .put("keepWaiting", authentication.optBoolean("keepWaiting"));
     if (authentication.optBoolean("keepWaiting")) {
+      if (service != null) service.clearReferences();
       screen.put("status", authentication.getString("status"));
       screen.put("note", AuthenticationGate.guidance(authentication));
     }
@@ -127,7 +118,13 @@ public final class AppMcpBackend implements McpRouter.Backend {
         : status;
   }
 
+  private static void clearElementReferences() {
+    PhoneAccessibilityService service = PhoneAccessibilityService.current();
+    if (service != null) service.clearReferences();
+  }
+
   static void resetTaskStatus() {
+    clearElementReferences();
     TASK.reset();
   }
 
@@ -136,6 +133,7 @@ public final class AppMcpBackend implements McpRouter.Backend {
       long token = CONTROL.begin();
       lease.set(token);
       activeCalls.put(Thread.currentThread(), token);
+      if (taskStatus() == PhoneTaskState.Status.IDLE) clearElementReferences();
       TASK.begin(android.os.SystemClock.elapsedRealtime());
     }
     TunnelService.taskStateChanged();
@@ -173,7 +171,7 @@ public final class AppMcpBackend implements McpRouter.Backend {
   }
 
   public JSONObject authenticationStatus() throws Exception {
-    observeAccessibility(BackendController.service().readScreen(backendGuard()));
+    observeAccessibility(BackendController.service().readScreen(backendGuard(), false, false));
     return AUTH.state();
   }
 
@@ -184,7 +182,7 @@ public final class AppMcpBackend implements McpRouter.Backend {
         expectedPackage,
         () -> {
           try {
-            return PhoneOperations.run(this::readScreen);
+            return PhoneOperations.run(() -> readScreen(false));
           } catch (Exception error) {
             Diagnostics.record(
                 DiagnosticEvent.problem(
@@ -207,6 +205,7 @@ public final class AppMcpBackend implements McpRouter.Backend {
   public void authenticationTaskFinished() {
     requireControl();
     TASK.finish();
+    clearElementReferences();
     AUTH.clear();
     TunnelService.taskStateChanged();
   }
@@ -244,12 +243,14 @@ public final class AppMcpBackend implements McpRouter.Backend {
                 .put("readScreen", true)
                 .put("gestures", true)
                 .put("screenshots", true)
+                .put("elementReferences", true)
                 .put("unicodeText", true)
                 .put("protectedScreens", false));
   }
 
-  public JSONObject readScreen() throws Exception {
-    return observeAccessibility(BackendController.service().readScreen(backendGuard()));
+  public JSONObject readScreen(boolean thorough) throws Exception {
+    boolean publishRefs = taskStatus() != PhoneTaskState.Status.IDLE;
+    return observeAccessibility(BackendController.service().readScreen(backendGuard(), thorough, publishRefs));
   }
 
   public String screenshotBase64() throws Exception {

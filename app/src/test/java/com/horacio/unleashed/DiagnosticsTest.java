@@ -23,18 +23,18 @@ public class DiagnosticsTest {
         "{\"area\":\"INVALID\",\"outcome\":\"ERROR\",\"code\":\"IO_ERROR\"}\n"
             .getBytes(java.nio.charset.StandardCharsets.UTF_8));
     assertEquals(0, store.read(false, 0).length());
-    store.append(actionResult(7));
+    store.append(actionResult(true, 7));
     assertEquals(1, store.read(true, 0).length());
   }
 
-  private DiagnosticEvent actionResult(int code) throws Exception {
+  private DiagnosticEvent actionResult(boolean failed, int durationMs) throws Exception {
     return DiagnosticEvent.completed(
         Area.TOOL,
         Operation.ACTION,
         newId(),
         newId(),
-        20,
-        new JSONObject().put("exitCode", code).put("stderr", "private-content-do-not-store"),
+        durationMs,
+        new JSONObject().put("isError", failed).put("message", "private-content-do-not-store"),
         null);
   }
 
@@ -50,13 +50,13 @@ public class DiagnosticsTest {
   public void historySurvivesNewStoreInstanceAndFiltersFailures() throws Exception {
     File directory = temporary.newFolder();
     DiagnosticStore first = new DiagnosticStore(directory);
-    first.append(actionResult(0));
-    first.append(actionResult(7));
+    first.append(actionResult(false, 0));
+    first.append(actionResult(true, 7));
     DiagnosticStore reopened = new DiagnosticStore(directory);
     assertEquals(2, reopened.read(false, 0).length());
     JSONArray failures = reopened.read(true, 0);
     assertEquals(1, failures.length());
-    assertEquals(7, failures.getJSONObject(0).getInt("exitCode"));
+    assertEquals("TOOL_FAILED", failures.getJSONObject(0).getString("code"));
     assertFalse(failures.toString().contains("private-content-do-not-store"));
   }
 
@@ -64,7 +64,7 @@ public class DiagnosticsTest {
   public void rotationBoundsDiskUsageAndKeepsNewestEntries() throws Exception {
     File directory = temporary.newFolder();
     DiagnosticStore store = new DiagnosticStore(directory, 1024);
-    for (int i = 1; i <= 30; i++) store.append(actionResult(i));
+    for (int i = 1; i <= 30; i++) store.append(actionResult(true, i));
     long bytes = 0;
     for (File file : directory.listFiles()) {
       assertTrue(file.length() <= 1024);
@@ -73,7 +73,7 @@ public class DiagnosticsTest {
     assertTrue(bytes <= 2048);
     JSONArray entries = store.read(false, 0);
     assertTrue(entries.length() < 30);
-    assertEquals(30, entries.getJSONObject(entries.length() - 1).getInt("exitCode"));
+    assertEquals(30, entries.getJSONObject(entries.length() - 1).getInt("durationMs"));
     assertEquals(1, store.read(false, 1).length());
   }
 
@@ -81,27 +81,27 @@ public class DiagnosticsTest {
   public void partialCrashWriteDoesNotDestroyValidHistoryOrNextEntry() throws Exception {
     File directory = temporary.newFolder();
     DiagnosticStore store = new DiagnosticStore(directory);
-    store.append(actionResult(7));
+    store.append(actionResult(true, 7));
     Files.write(
         new File(directory, "events.jsonl").toPath(),
         "{\"incomplete\":".getBytes(),
         StandardOpenOption.APPEND);
     assertEquals(1, store.read(false, 0).length());
-    new DiagnosticStore(directory).append(actionResult(9));
+    new DiagnosticStore(directory).append(actionResult(true, 9));
     JSONArray events = store.read(false, 0);
     assertEquals(2, events.length());
-    assertEquals(9, events.getJSONObject(1).getInt("exitCode"));
+    assertEquals(9, events.getJSONObject(1).getInt("durationMs"));
   }
 
   @Test
   public void clearRemovesBothRotatedFilesAndAllowsNewEvents() throws Exception {
     File directory = temporary.newFolder();
     DiagnosticStore store = new DiagnosticStore(directory, 1024);
-    for (int i = 0; i < 10; i++) store.append(actionResult(i));
+    for (int i = 0; i < 10; i++) store.append(actionResult(true, i));
     store.clear();
     assertEquals(0, new DiagnosticStore(directory).read(false, 0).length());
     assertEquals(0, directory.listFiles().length);
-    store.append(actionResult(0));
+    store.append(actionResult(false, 0));
     assertEquals(1, store.read(false, 0).length());
   }
 
@@ -116,7 +116,7 @@ public class DiagnosticsTest {
             writers.submit(
                 () -> {
                   try {
-                    store.append(actionResult(0));
+                    store.append(actionResult(false, 0));
                   } catch (Exception error) {
                     throw new RuntimeException(error);
                   }
@@ -139,16 +139,13 @@ public class DiagnosticsTest {
   }
 
   @Test
-  public void nestedToolFailureRecordsExitAndOmitsArgumentsAndPrivateOutput() throws Exception {
+  public void toolFailureRecordsCauseAndOmitsArgumentsAndPrivateMessage() throws Exception {
     List<DiagnosticEvent> events = new ArrayList<>();
     McpRouterTest.Fake backend =
         new McpRouterTest.Fake() {
           @Override
           public JSONObject action(JSONObject args) throws Exception {
-            return new JSONObject()
-                .put("exitCode", 7)
-                .put("stdout", "private-screen-do-not-store")
-                .put("stderr", "sk-test-do-not-store");
+            throw new SecurityException("private-screen-do-not-store");
           }
         };
     McpRouter router = new McpRouter(backend, events::add);
@@ -164,8 +161,7 @@ public class DiagnosticsTest {
     JSONObject start = events.get(0).json(), end = events.get(1).json();
     assertEquals(start.getString("requestId"), end.getString("requestId"));
     assertEquals("ERROR", end.getString("outcome"));
-    assertEquals("TOOL_FAILED", end.getString("code"));
-    assertEquals(7, end.getInt("exitCode"));
+    assertEquals("PERMISSION_DENIED", end.getString("code"));
     assertFalse(start.toString().contains("do-not-store"));
     assertFalse(end.toString().contains("do-not-store"));
   }

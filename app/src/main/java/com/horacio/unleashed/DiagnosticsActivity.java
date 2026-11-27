@@ -171,8 +171,6 @@ public class DiagnosticsActivity extends Activity {
                                 + event.optLong("durationMs")
                                 + " ms\n"
                                 + event.optString("explanation");
-                        if (event.has("exitCode"))
-                          value += "\nExit code: " + event.optInt("exitCode");
                         if (event.has("httpStatus"))
                           value += "\nHTTP status: " + event.optInt("httpStatus");
                         if (event.has("rpcErrorCode"))

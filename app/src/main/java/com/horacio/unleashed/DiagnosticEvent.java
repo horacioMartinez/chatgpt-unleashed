@@ -51,6 +51,10 @@ public final class DiagnosticEvent {
     PERMISSION_DENIED("Android or the phone backend denied the operation."),
     TIMEOUT("The operation timed out."),
     IO_ERROR("A device, network, or storage operation failed."),
+    STALE_ELEMENT("The observed element is no longer available."),
+    ELEMENT_ACTION_UNSUPPORTED("The element could not perform the requested action."),
+    INPUT_FOCUS_MISSING("The intended text field did not have input focus."),
+    INPUT_FIELD_UNSUPPORTED("The field does not support the requested accessibility operation."),
     UI_INSPECTION_FAILED("The phone screen could not be inspected."),
     RESTORE_FAILED("The existing ChatGPT task could not be restored."),
     TOOL_FAILED("The phone tool could not complete."),
@@ -86,7 +90,7 @@ public final class DiagnosticEvent {
   private final String time = java.time.Instant.now().toString();
   private final String requestId, taskId;
   private final long durationMs;
-  private final Integer exitCode, httpStatus;
+  private final Integer httpStatus;
   private Integer rpcErrorCode;
   private String rpcMethod;
 
@@ -98,7 +102,6 @@ public final class DiagnosticEvent {
       String requestId,
       String taskId,
       long durationMs,
-      Integer exitCode,
       Integer httpStatus) {
     this.area = area;
     this.operation = operation;
@@ -107,7 +110,6 @@ public final class DiagnosticEvent {
     this.requestId = safeId(requestId);
     this.taskId = safeId(taskId);
     this.durationMs = Math.max(0, durationMs);
-    this.exitCode = exitCode;
     this.httpStatus = httpStatus;
   }
 
@@ -142,13 +144,13 @@ public final class DiagnosticEvent {
   }
 
   public static DiagnosticEvent event(Area area, Operation operation, Outcome outcome, Code code) {
-    return new DiagnosticEvent(area, operation, outcome, code, "", "", 0, null, null);
+    return new DiagnosticEvent(area, operation, outcome, code, "", "", 0, null);
   }
 
   public static DiagnosticEvent started(
       Area area, Operation operation, String request, String task) {
     return new DiagnosticEvent(
-        area, operation, Outcome.STARTED, Code.STARTED, request, task, 0, null, null);
+        area, operation, Outcome.STARTED, Code.STARTED, request, task, 0, null);
   }
 
   public static DiagnosticEvent problem(
@@ -163,7 +165,6 @@ public final class DiagnosticEvent {
         request,
         "",
         0,
-        null,
         null);
   }
 
@@ -178,7 +179,6 @@ public final class DiagnosticEvent {
         request,
         "",
         0,
-        null,
         status);
   }
 
@@ -193,7 +193,6 @@ public final class DiagnosticEvent {
             trace,
             "",
             0,
-            null,
             null);
     event.rpcErrorCode = error.optInt("code");
     String method = request.optString("method");
@@ -205,13 +204,14 @@ public final class DiagnosticEvent {
     return event;
   }
 
-  private static Code exceptionCode(Operation operation, Exception error) {
+  static Code exceptionCode(Operation operation, Exception error) {
     if (error instanceof InterruptedException || error instanceof CancellationException)
       return Code.CANCELLED;
     if (error instanceof InterruptedIOException || error instanceof TimeoutException)
       return Code.TIMEOUT;
+    if (error instanceof FieldInputException) return ((FieldInputException) error).code;
     if (error instanceof SecurityException) return Code.PERMISSION_DENIED;
-    if (error instanceof IllegalArgumentException || error instanceof JSONException)
+    if (error instanceof InvalidToolArgumentsException)
       return Code.INVALID_ARGUMENTS;
     if (operation == Operation.READ_SCREEN) return Code.UI_INSPECTION_FAILED;
     if (operation == Operation.FINISH_TASK) return Code.RESTORE_FAILED;
@@ -238,7 +238,6 @@ public final class DiagnosticEvent {
           request,
           task,
           durationMs,
-          null,
           null);
     boolean failed = result != null && (result.optBoolean("isError") || result.has("error"));
     JSONObject data = result;
@@ -257,14 +256,7 @@ public final class DiagnosticEvent {
           }
         }
     }
-    Integer exit = null;
     if (data != null) {
-      JSONObject command = data.optJSONObject("action");
-      if (command == null) command = data;
-      if (command.has("exitCode")) {
-        exit = command.optInt("exitCode", -1);
-        failed |= exit != 0;
-      }
       JSONObject auth = data.optJSONObject("authentication");
       if (auth == null && data.optJSONObject("screen") != null)
         auth = data.optJSONObject("screen").optJSONObject("authentication");
@@ -278,7 +270,6 @@ public final class DiagnosticEvent {
             request,
             task,
             durationMs,
-            exit,
             null);
       if (!failed
           && (data.optBoolean("cancelled")
@@ -292,7 +283,6 @@ public final class DiagnosticEvent {
             request,
             task,
             durationMs,
-            exit,
             null);
     }
     Code code =
@@ -307,7 +297,6 @@ public final class DiagnosticEvent {
         request,
         task,
         durationMs,
-        exit,
         null);
   }
 
@@ -323,7 +312,6 @@ public final class DiagnosticEvent {
             .put("durationMs", durationMs);
     if (!requestId.isEmpty()) entry.put("requestId", requestId);
     if (!taskId.isEmpty()) entry.put("taskId", taskId);
-    if (exitCode != null) entry.put("exitCode", exitCode);
     if (httpStatus != null) entry.put("httpStatus", httpStatus);
     if (rpcErrorCode != null) entry.put("rpcErrorCode", rpcErrorCode);
     if (rpcMethod != null) entry.put("rpcMethod", rpcMethod);
