@@ -27,10 +27,10 @@ public class McpRouterTest {
       actions++;
       last = args.toString();
       if (stopDuringAction) stopped = true;
-      return new JSONObject().put("exitCode", 0).put("stdout", "ok");
+      return new JSONObject().put("actionPerformed", true);
     }
 
-    public JSONObject readScreen() throws Exception {
+    public JSONObject readScreen(boolean thorough) throws Exception {
       observations++;
       if (readFails) throw new IllegalStateException("Backend still starting");
       return new JSONObject().put("elements", new JSONArray());
@@ -80,9 +80,7 @@ public class McpRouterTest {
     public JSONObject returnToChatGPT() throws Exception {
       returns++;
       if (returnThrows) throw new IllegalStateException("Backend disconnected");
-      return new JSONObject()
-          .put("exitCode", returnSucceeds ? 0 : 1)
-          .put("returned", returnSucceeds);
+      return new JSONObject().put("returned", returnSucceeds);
     }
 
     public JSONObject authenticationStatus() throws Exception {
@@ -204,7 +202,7 @@ public class McpRouterTest {
     JSONObject value =
         new JSONObject(result.getJSONArray("content").getJSONObject(0).getString("text"));
     assertTrue(value.getBoolean("cancelled"));
-    assertFalse(value.has("stdout"));
+    assertFalse(value.has("action"));
     assertEquals(1, backend.started);
     assertEquals(1, backend.completed);
   }

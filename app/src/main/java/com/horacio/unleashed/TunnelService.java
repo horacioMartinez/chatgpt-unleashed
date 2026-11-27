@@ -62,7 +62,11 @@ public class TunnelService extends Service {
               service.ui.postDelayed(() -> prepared.complete(null), 100);
             } else prepared.complete(null);
           });
-      prepared.get(2, TimeUnit.SECONDS);
+      try {
+        prepared.get(2, TimeUnit.SECONDS);
+      } catch (TimeoutException timeout) {
+        throw new TimeoutException("Timed out preparing the Android overlay before gesture dispatch");
+      }
       return input.call();
     } finally {
       service.ui.post(

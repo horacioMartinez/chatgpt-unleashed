@@ -66,3 +66,22 @@ Log in to [OpenAI Platform](https://platform.openai.com/), then follow these ste
 5. Verify that unleashed works by asking ChatGPT:
 
    > Using @unleashed, open my calculator app and compute 1 + 1.
+
+## Phone controls
+
+A screen read returns the visible elements and their pixel bounds. Foreground app elements can also carry a `ref`, a list of supported `actions`, and their keyboard focus state (`inputFocused`). Use the reference directly when choosing an element. If the element moves, its reference can still resolve. If it disappears or changes identity, read again after `STALE_ELEMENT`.
+
+To enter text step by step, read the screen and choose the editor’s `ref`. Call `focus` and verify `inputFocused: true` on that editor in the returned screen. Call `type` and verify the field value in its returned screen. Both actions include an observation, so a separate read is only needed if it is unavailable or the result is unclear.
+
+For one-call entry, use `type_into` with the editor’s reference and the text. Unleashed verifies focus and targets the same editor for one write. A `text_observed` outcome means the expected value was read back. For `text_unconfirmed`, inspect the screen before deciding whether to retry.
+
+| Action | Behavior |
+| --- | --- |
+| `{"action":"tap","x":590,"y":420}` | Sends one physical tap. The screen shows which element received focus. |
+| `{"action":"focus","element":"<ref>"}` | Requests keyboard focus on that element and verifies it. |
+| `{"action":"type","text":"example"}` | Inserts text once into the currently focused editor. Missing focus returns `INPUT_FOCUS_MISSING`. |
+| `{"action":"type_into","element":"<ref>","text":"example"}` | Focuses the named editor, inserts at its selection, and checks its value. |
+| `{"action":"activate","element":"<ref>"}` | Asks Android to invoke the element’s click action. Check the returned screen for the outcome. |
+| `{"action":"scroll","element":"<ref>","direction":"forward"}` | Asks the element to scroll in one of its advertised `scrollDirections`. |
+
+Use a physical swipe for a gesture between two screen coordinates. The agent chooses how to proceed when a pop-up intercepts a tap or an app declines an accessibility action.

@@ -1,8 +1,6 @@
 <resources>
     <string name="chatgpt_working">ChatGPT is working</string>
     <string name="chatgpt_waiting_for_authentication">ChatGPT is waiting for authentication</string>
-    <string name="show_task_status_overlay">Show task status over other apps</string>
-    <string name="task_status_overlay_help">Tap Cancel on the banner to cancel the current task while keeping the connection available. Authentication dialogs may block taps; protected screens may hide the banner.</string>
     <string name="cancel_current_phone_task">Cancel</string>
     <string name="cancel_current_phone_task_description">Cancel the current ChatGPT phone task</string>
     <string name="compact_bubble_working">ChatGPT · Working</string>

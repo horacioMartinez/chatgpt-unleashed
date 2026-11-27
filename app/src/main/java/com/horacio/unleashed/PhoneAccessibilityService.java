@@ -11,6 +11,7 @@ import android.view.accessibility.*;
 import java.io.ByteArrayOutputStream;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.json.*;
 
 /** Public Android APIs for screen observations and requested input. */
@@ -18,17 +19,44 @@ public final class PhoneAccessibilityService extends AccessibilityService {
   private static volatile PhoneAccessibilityService live;
   private final Handler main = new Handler(Looper.getMainLooper());
   private final Set<CompletableFuture<?>> pending = ConcurrentHashMap.newKeySet();
+  // Keep one trailing probe so a window change during an active scan is still observed.
+  private final ExecutorService authenticationWorker =
+      new ThreadPoolExecutor(
+          1,
+          1,
+          0,
+          TimeUnit.MILLISECONDS,
+          new ArrayBlockingQueue<>(1),
+          r -> new Thread(r, "phone-auth-observer"),
+          new ThreadPoolExecutor.DiscardPolicy());
+  private final ElementReferences references = new ElementReferences();
+  private final AtomicInteger interruption = new AtomicInteger();
   private long lastAuthenticationEvent;
   private String lastAppPackage = "";
   private long lastLaunch;
-  private static final int NODE_LIMIT = 1600, ELEMENT_LIMIT = 350;
-  private final Runnable authenticationRecheck =
-      () -> {
-        if (live == this
-            && BackendController.allowed()
-            && AppMcpBackend.taskStatus() != PhoneTaskState.Status.IDLE)
-          AppMcpBackend.accessibilityAuthenticationChanged();
-      };
+  private static final int RECENTS_NODE_LIMIT = 1600;
+  private final Runnable authenticationRecheck = this::queueAuthenticationCheck;
+
+  // Android delivers accessibility events and gesture callbacks on main. A slow remote
+  // tree walk must never hold that thread, or the callback can time out after input was sent.
+  private void queueAuthenticationCheck() {
+    if (live != this) return;
+    authenticationWorker.execute(
+        () -> {
+          try {
+            PhoneOperations.run(
+                () -> {
+                  if (live == this
+                      && BackendController.allowed()
+                      && AppMcpBackend.taskStatus() != PhoneTaskState.Status.IDLE)
+                    AppMcpBackend.observeAccessibility(safeSnapshot(interruption.get(), false, null));
+                  return null;
+                });
+          } catch (Exception unavailable) {
+            // A failed background probe is not evidence of unlock.
+          }
+        });
+  }
 
   void scheduleAuthenticationCheck(long delayMillis) {
     main.post(
@@ -69,9 +97,10 @@ public final class PhoneAccessibilityService extends AccessibilityService {
   @Override
   public void onDestroy() {
     if (live == this) live = null;
-    cancelPending();
+    references.clear();
     for (CompletableFuture<?> future : pending)
       future.completeExceptionally(new IllegalStateException("Accessibility service disconnected"));
+    authenticationWorker.shutdownNow();
     main.removeCallbacksAndMessages(null);
     TunnelService.taskStateChanged();
     super.onDestroy();
@@ -85,6 +114,8 @@ public final class PhoneAccessibilityService extends AccessibilityService {
   static void cancelPending() {
     PhoneAccessibilityService service = live;
     if (service == null) return;
+    service.interruption.incrementAndGet();
+    service.references.clear();
     for (CompletableFuture<?> future : service.pending)
       future.completeExceptionally(new CancellationException("Phone operation stopped"));
   }
@@ -97,7 +128,7 @@ public final class PhoneAccessibilityService extends AccessibilityService {
         && AppMcpBackend.taskStatus() != PhoneTaskState.Status.IDLE
         && now - lastAuthenticationEvent >= 300) {
       lastAuthenticationEvent = now;
-      AppMcpBackend.accessibilityAuthenticationChanged();
+      queueAuthenticationCheck();
     }
   }
 
@@ -176,31 +207,44 @@ public final class PhoneAccessibilityService extends AccessibilityService {
         .put("promptVisible", prompt);
   }
 
-  JSONObject authentication(Runnable guard) throws Exception {
-    return onMain(this::device, guard);
+  void clearReferences() {
+    references.clear();
   }
 
-  JSONObject readScreen(Runnable guard) throws Exception {
-    JSONObject screen = onMain(this::safeSnapshot, guard);
+  JSONObject readScreen(Runnable guard, boolean thorough, boolean publishRefs) throws Exception {
+    try (ElementReferences.Capture capture = publishRefs ? new ElementReferences.Capture() : null) {
+      JSONObject screen = readScreen(guard, thorough, capture);
+      if (capture != null) references.publish(screen, capture);
+      return screen;
+    }
+  }
+
+  private JSONObject readScreen(Runnable guard, boolean thorough, ElementReferences.Capture capture)
+      throws Exception {
+    int generation = interruption.get();
+    guard.run();
+    JSONObject screen = safeSnapshot(generation, thorough, capture);
+    guard.run();
     // Window transitions can briefly expose only the status bar. Wait for content,
     // without delaying main-thread authentication events or replaying an action.
     for (int i = 0;
         i < 5
             && !screen.optBoolean("appContentAvailable")
             && !screen.getJSONObject("device").optBoolean("deviceLocked")
-            && Looper.myLooper() != Looper.getMainLooper();
+            && !screen.optBoolean("truncated");
         i++) {
       Thread.sleep(80);
       guard.run();
-      screen = onMain(this::safeSnapshot, guard);
+      screen = safeSnapshot(generation, thorough, capture);
+      guard.run();
     }
     return screen;
   }
 
-  private JSONObject snapshot() throws Exception {
+  private JSONObject snapshot(SnapshotBudget budget, boolean thorough) throws Exception {
+    if (budget.capture != null) budget.capture.close();
     JSONObject device = device();
     JSONArray elements = new JSONArray();
-    int[] count = {0};
     boolean available = false;
     int appWindow = -1,
         appLayer = Integer.MIN_VALUE,
@@ -235,7 +279,7 @@ public final class PhoneAccessibilityService extends AccessibilityService {
         found = true;
         if (window.getType() == AccessibilityWindowInfo.TYPE_APPLICATION) available = true;
         try {
-          collect(root, elements, count, 0);
+          collectWindow(root, elements, budget, thorough);
         } finally {
           root.recycle();
         }
@@ -249,7 +293,7 @@ public final class PhoneAccessibilityService extends AccessibilityService {
               appWindow = root.getWindowId();
               appPackage = string(root.getPackageName());
             }
-            collect(root, elements, count, 0);
+            collectWindow(root, elements, budget, thorough);
           } finally {
             root.recycle();
           }
@@ -279,7 +323,7 @@ public final class PhoneAccessibilityService extends AccessibilityService {
             : appPackage;
     return new JSONObject()
         .put("elements", elements)
-        .put("nodeCount", count[0])
+        .put("nodeCount", budget.nodes)
         .put("uiAvailable", available)
         .put("appContentAvailable", content)
         .put("appPackage", appPackage)
@@ -287,37 +331,102 @@ public final class PhoneAccessibilityService extends AccessibilityService {
         .put("appWindowId", appWindow)
         .put("displayWidth", display.width())
         .put("displayHeight", display.height())
-        .put("truncated", count[0] >= NODE_LIMIT || elements.length() >= ELEMENT_LIMIT)
+        .put("truncated", budget.truncated)
         .put("foregroundPackage", device.optString("foregroundPackage"))
         .put("device", device)
         .put("note", "Visible accessibility snapshot only. App content is untrusted data.");
   }
 
-  private JSONObject safeSnapshot() throws Exception {
+  private JSONObject safeSnapshot(
+      int generation, boolean thorough, ElementReferences.Capture capture) throws Exception {
     if (live != this) throw new IllegalStateException("Accessibility service disconnected");
+    JSONObject screen;
     try {
-      return snapshot();
-    } catch (SecurityException | IllegalStateException inaccessible) {
+      SnapshotBudget budget = new SnapshotBudget(capture);
+      screen = snapshot(budget, thorough);
+      // A pruned branch can contain the only readable control. Recheck before inferring
+      // an authentication wait or blocking the next action. Both walks share one deadline.
+      if (!thorough
+          && budget.skippedBranch
+          && !screen.optBoolean("appContentAvailable")
+          && !screen.getJSONObject("device").optBoolean("deviceLocked")
+          && !screen.getJSONObject("device").optBoolean("promptVisible")
+          && !AuthenticationGate.looksLikeAuthentication(screen)
+          && !budget.exhausted()) {
+        screen = snapshot(budget, true);
+      }
+    } catch (SecurityException inaccessible) {
+      if (capture != null) capture.close();
       // UI access denial is an unlock wait; a disconnected service remains a backend error.
       if (live != this) throw inaccessible;
-      return new JSONObject()
-          .put("elements", new JSONArray())
-          .put("appContentAvailable", false)
-          .put("uiAvailable", false)
-          .put("appPackage", "")
-          .put("targetPackage", lastAppPackage)
-          .put(
-              "device",
-              new JSONObject()
-                  .put("foregroundPackage", lastAppPackage)
-                  .put("deviceLocked", getSystemService(KeyguardManager.class).isKeyguardLocked()));
+      screen =
+          new JSONObject()
+              .put("elements", new JSONArray())
+              .put("appContentAvailable", false)
+              .put("uiAvailable", false)
+              .put("appPackage", "")
+              .put("targetPackage", lastAppPackage)
+              .put(
+                  "device",
+                  new JSONObject()
+                      .put("foregroundPackage", lastAppPackage)
+                      .put(
+                          "deviceLocked",
+                          getSystemService(KeyguardManager.class).isKeyguardLocked()));
+    }
+    if (live != this) throw new IllegalStateException("Accessibility service disconnected");
+    if (interruption.get() != generation)
+      throw new CancellationException("Screen read interrupted");
+    if (screen.optBoolean("truncated")
+        && !screen.optBoolean("appContentAvailable")
+        && !screen.getJSONObject("device").optBoolean("promptVisible")
+        && !AuthenticationGate.looksLikeAuthentication(screen)) {
+      throw new IllegalStateException(
+          "Accessibility traversal reached its limit before returning readable foreground content");
+    }
+    return screen;
+  }
+
+  private static final class SnapshotBudget {
+    final long deadline = SystemClock.elapsedRealtime() + TimeUnit.SECONDS.toMillis(5);
+    final ElementReferences.Capture capture;
+
+    SnapshotBudget(ElementReferences.Capture capture) {
+      this.capture = capture;
+    }
+
+    int nodes;
+    boolean truncated, skippedBranch;
+
+    boolean exhausted() throws InterruptedException {
+      if (Thread.currentThread().isInterrupted())
+        throw new InterruptedException("Screen read stopped");
+      if (SystemClock.elapsedRealtime() >= deadline) truncated = true;
+      return truncated;
     }
   }
 
-  private void collect(AccessibilityNodeInfo node, JSONArray elements, int[] count, int depth)
+  private void collectWindow(
+      AccessibilityNodeInfo root, JSONArray elements, SnapshotBudget budget, boolean thorough)
       throws Exception {
-    if (depth > 64 || ++count[0] > NODE_LIMIT) return;
-    if (node.isVisibleToUser() && elements.length() < ELEMENT_LIMIT) {
+    // System UI contains authentication controls. Preserve visibility checks for every descendant.
+    boolean inspectAll = thorough || "com.android.systemui".equals(string(root.getPackageName()));
+    collect(root, elements, budget, 0, inspectAll);
+  }
+
+  private void collect(
+      AccessibilityNodeInfo node, JSONArray elements, SnapshotBudget budget, int depth,
+      boolean inspectAll)
+      throws Exception {
+    if (depth > 64 || budget.exhausted()) return;
+    budget.nodes++;
+    boolean visible = node.isVisibleToUser();
+    // Android can expose children through a window root that has no visible surface of its own.
+    if (depth > 0 && !visible && !inspectAll) {
+      if (node.getChildCount() > 0) budget.skippedBranch = true;
+      return;
+    }
+    if (visible) {
       String text = bounded(node.getText()), description = bounded(node.getContentDescription());
       if (!text.isEmpty()
           || !description.isEmpty()
@@ -326,6 +435,7 @@ public final class PhoneAccessibilityService extends AccessibilityService {
           || node.isEditable()) {
         Rect bounds = new Rect();
         node.getBoundsInScreen(bounds);
+        if (budget.capture != null) budget.capture.add(node);
         elements.put(
             new JSONObject()
                 .put("text", node.isPassword() ? "[password field]" : text)
@@ -347,14 +457,16 @@ public final class PhoneAccessibilityService extends AccessibilityService {
                 .put("password", node.isPassword())
                 .put("clickable", node.isClickable())
                 .put("scrollable", node.isScrollable())
-                .put("editable", node.isEditable()));
+                .put("editable", node.isEditable())
+                .put("enabled", node.isEnabled())
+                .put("inputFocused", node.isFocused()));
       }
     }
-    for (int i = 0; i < node.getChildCount() && count[0] < NODE_LIMIT; i++) {
+    for (int i = 0; i < node.getChildCount() && !budget.exhausted(); i++) {
       AccessibilityNodeInfo child = node.getChild(i);
       if (child != null)
         try {
-          collect(child, elements, count, depth + 1);
+          collect(child, elements, budget, depth + 1, inspectAll);
         } finally {
           child.recycle();
         }
@@ -365,31 +477,139 @@ public final class PhoneAccessibilityService extends AccessibilityService {
     // Validate before any screen interaction.
     PhoneAction.validate(args);
     String action = args.getString("action");
+    if (action.equals("type_into"))
+      return typeInto(args.getString("element"), args.getString("text"), guard);
     if (action.equals("tap") || action.equals("swipe")) gesture(args, guard);
-    else
+    else if (action.equals("focus") || action.equals("activate") || action.equals("scroll"))
+      actOnElement(args, guard);
+    else if (action.equals("type")
+        || (action.equals("key") && args.getString("key").matches("ENTER|DEL"))) {
+      editField(args, guard);
+    } else
       onMain(
           () -> {
             if (action.equals("launch")) {
               String pkg = args.getString("package");
               Intent launch = getPackageManager().getLaunchIntentForPackage(pkg);
               if (launch == null)
-                throw new IllegalArgumentException("No visible launchable activity for " + pkg);
+                throw new IllegalStateException("No visible launchable activity for " + pkg);
               launch.addFlags(
                   Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
               startActivity(launch);
               lastAppPackage = pkg;
               lastLaunch = SystemClock.elapsedRealtime();
-            } else if (action.equals("type")) edit(args.getString("text"), false);
-            else key(args.getString("key"));
+            } else key(args.getString("key"));
             return true;
           },
           guard);
-    // Give animation/event delivery a short, bounded window; never replay an action.
+    // Allow the observed UI to reflect the single action just dispatched.
     Thread.sleep(220);
     guard.run();
-    return new JSONObject()
-        .put("exitCode", 0)
-        .put("actionPerformed", true);
+    JSONObject result = new JSONObject().put("actionPerformed", true);
+    if (action.equals("focus")) result.put("inputFocused", true);
+    if (action.equals("activate") || action.equals("scroll"))
+      result.put("outcome", "provider_accepted");
+    return result;
+  }
+
+  private AccessibilityNodeInfo resolveElement(String ref) {
+    AccessibilityNodeInfo root = getRootInActiveWindow();
+    try {
+      return references.resolve(ref, root);
+    } finally {
+      if (root != null) root.recycle();
+    }
+  }
+
+  private static void focusElement(AccessibilityNodeInfo node, Runnable guard)
+      throws InterruptedException {
+    guard.run();
+    if (node.isFocused()) return;
+    if (!node.performAction(AccessibilityNodeInfo.ACTION_FOCUS))
+      throw FieldInputException.unsupportedElement("Android rejected focus", node);
+    for (int attempt = 0; attempt < 5; attempt++) {
+      guard.run();
+      if (!node.refresh()) throw FieldInputException.stale();
+      if (node.isFocused()) return;
+      if (attempt < 4) Thread.sleep(50);
+    }
+    throw FieldInputException.missing("Android did not confirm keyboard focus", node);
+  }
+
+  private void actOnElement(JSONObject args, Runnable guard) throws Exception {
+    AccessibilityNodeInfo node = resolveElement(args.getString("element"));
+    try {
+      String action = args.getString("action");
+      if (!node.isEnabled())
+        throw FieldInputException.unsupportedElement("The element is disabled", node);
+      if (action.equals("focus")) {
+        focusElement(node, guard);
+        return;
+      }
+      int operation =
+          action.equals("activate")
+              ? AccessibilityNodeInfo.ACTION_CLICK
+              : args.getString("direction").equals("forward")
+                  ? AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+                  : AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD;
+      guard.run();
+      if (!node.performAction(operation))
+        throw FieldInputException.unsupportedElement("Android rejected " + action, node);
+    } finally {
+      node.recycle();
+    }
+  }
+
+  private JSONObject typeInto(String ref, String text, Runnable guard) throws Exception {
+    AccessibilityNodeInfo target = resolveElement(ref);
+    try {
+      EditableFieldResolver.requireWritable(target);
+      if (!target
+          .getActionList()
+          .contains(AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_TEXT))
+        throw FieldInputException.unsupported("The editor does not support text entry", target);
+      focusElement(target, guard);
+    } finally {
+      target.recycle();
+    }
+
+    // Focus handlers may replace the editor, move to another window, or focus a sibling.
+    // Resolve the original identity again. Never switch the intended write to a new recipient.
+    AccessibilityNodeInfo editor = resolveElement(ref);
+    String expected;
+    try {
+      expected = writeText(editor, text, false, guard);
+    } finally {
+      editor.recycle();
+    }
+    boolean observed = false;
+    if (expected != null) {
+      Thread.sleep(220);
+      guard.run();
+      try {
+        AccessibilityNodeInfo current = resolveElement(ref);
+        try {
+          observed =
+              expected.equals(
+                  AccessibilityEditing.fieldText(
+                      string(current.getText()), current.isShowingHintText()));
+        } finally {
+          current.recycle();
+        }
+      } catch (IllegalStateException | SecurityException unavailable) {
+        // The request was dispatched. A missing editor cannot establish whether it took effect.
+      }
+    }
+    JSONObject result =
+        new JSONObject()
+            .put("textDispatched", true)
+            .put("outcome", observed ? "text_observed" : "text_unconfirmed");
+    if (observed) result.put("actionPerformed", true);
+    else
+      result.put(
+          "nextAction",
+          "Inspect the returned screen before deciding whether another write is needed.");
+    return result;
   }
 
   private void gesture(JSONObject args, Runnable guard) throws Exception {
@@ -408,7 +628,7 @@ public final class PhoneAccessibilityService extends AccessibilityService {
             int endX = args.optString("action").equals("swipe") ? args.getInt("endX") : x;
             int endY = args.optString("action").equals("swipe") ? args.getInt("endY") : y;
             if (!screen.contains(x, y) || !screen.contains(endX, endY))
-              throw new IllegalArgumentException("Coordinates are outside the display");
+              throw new InvalidToolArgumentsException("Coordinates are outside the display");
             Path path = new Path();
             path.moveTo(x, y);
             boolean swipe = args.getString("action").equals("swipe");
@@ -443,37 +663,67 @@ public final class PhoneAccessibilityService extends AccessibilityService {
             done.completeExceptionally(error);
           }
         });
-    await(done, 8, guard);
-  }
-
-  private AccessibilityNodeInfo focused() {
-    AccessibilityNodeInfo node = findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
-    if (node == null || !node.isEditable() || node.isPassword()) {
-      if (node != null) node.recycle();
-      throw new IllegalStateException("Focus an editable, non-password field first");
-    }
-    return node;
-  }
-
-  private void edit(String inserted, boolean delete) {
-    AccessibilityNodeInfo node = focused();
     try {
-      String existing =
-          AccessibilityEditing.fieldText(string(node.getText()), node.isShowingHintText());
-      int start = node.getTextSelectionStart(), end = node.getTextSelectionEnd();
-      if (start < 0 || end < 0) start = end = existing.length();
-      String updated = AccessibilityEditing.replace(existing, start, end, inserted, delete);
-      Bundle data = new Bundle();
-      data.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, updated);
-      if (!node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, data))
-        throw new IllegalStateException("This field does not support accessibility text entry");
-      int cursor = AccessibilityEditing.cursor(existing, start, end, inserted, delete);
-      Bundle selection = new Bundle();
-      selection.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, cursor);
-      selection.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, cursor);
-      node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, selection);
+      await(done, 8, guard);
+    } catch (TimeoutException missingCallback) {
+      throw new TimeoutException("Android gesture completion was not confirmed within 8 seconds");
+    }
+  }
+
+  private void editField(JSONObject args, Runnable guard) throws Exception {
+    guard.run();
+    AccessibilityNodeInfo node = new EditableFieldResolver(this, guard).focusedEditor();
+    try {
+      guard.run();
+      boolean delete =
+          "DEL".equals(args.optString("key")) && "key".equals(args.getString("action"));
+      if ("key".equals(args.getString("action")) && !delete) {
+        if (!node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.getId()))
+          throw FieldInputException.unsupported("The focused field rejected Enter", node);
+        return;
+      }
+      if (writeText(node, delete ? "" : args.getString("text"), delete, guard) == null)
+        throw FieldInputException.unsupported(
+            "The text operation could not be confirmed. Inspect the field before retrying", node);
     } finally {
       node.recycle();
+    }
+  }
+
+  /**
+   * Dispatch exactly one text mutation to this node. A null result means dispatch was unconfirmed.
+   */
+  private String writeText(
+      AccessibilityNodeInfo node, String inserted, boolean delete, Runnable guard) {
+    guard.run();
+    if (!node.refresh() || !node.isVisibleToUser()) throw FieldInputException.stale();
+    EditableFieldResolver.requireWritable(node);
+    if (!node.isFocused())
+      throw FieldInputException.missing(
+          "The intended editor lost keyboard focus before typing", node);
+    String existing =
+        AccessibilityEditing.fieldText(string(node.getText()), node.isShowingHintText());
+    int start = node.getTextSelectionStart(), end = node.getTextSelectionEnd();
+    if (start < 0 || end < 0) start = end = existing.length();
+    String updated = AccessibilityEditing.replace(existing, start, end, inserted, delete);
+    int cursor = AccessibilityEditing.cursor(existing, start, end, inserted, delete);
+    Bundle data = new Bundle();
+    data.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, updated);
+    guard.run();
+    try {
+      if (!node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, data)) return null;
+      if (node.refresh()
+          && node.isFocused()
+          && !node.isPassword()
+          && updated.contentEquals(string(node.getText()))) {
+        Bundle selection = new Bundle();
+        selection.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, cursor);
+        selection.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, cursor);
+        node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, selection);
+      }
+      return updated;
+    } catch (IllegalStateException | SecurityException unavailable) {
+      return null;
     }
   }
 
@@ -489,20 +739,6 @@ public final class PhoneAccessibilityService extends AccessibilityService {
       case "APP_SWITCH":
         action = GLOBAL_ACTION_RECENTS;
         break;
-      case "DEL":
-        edit("", true);
-        return;
-      case "ENTER":
-        AccessibilityNodeInfo node = focused();
-        try {
-          if (!node.performAction(
-              AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.getId()))
-            throw new IllegalStateException(
-                "Enter is unsupported by this field. Use the visible button instead.");
-        } finally {
-          node.recycle();
-        }
-        return;
       case "WAKEUP":
         startActivity(
             new Intent(this, WakePhoneActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
@@ -649,7 +885,6 @@ public final class PhoneAccessibilityService extends AccessibilityService {
       }
     }
     return new JSONObject()
-        .put("exitCode", 1)
         .put("returned", false)
         .put(
             "error",
@@ -659,11 +894,11 @@ public final class PhoneAccessibilityService extends AccessibilityService {
   }
 
   private boolean recentsNode(AccessibilityNodeInfo node, boolean scroll, int[] count) {
-    if (++count[0] > NODE_LIMIT) return false;
+    if (++count[0] > RECENTS_NODE_LIMIT) return false;
     String id = string(node.getViewIdResourceName()).toLowerCase(Locale.ROOT);
     if (node.isScrollable() && (id.contains("overview") || id.contains("recents")))
       return !scroll || node.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD);
-    for (int i = 0; i < node.getChildCount() && count[0] < NODE_LIMIT; i++) {
+    for (int i = 0; i < node.getChildCount() && count[0] < RECENTS_NODE_LIMIT; i++) {
       AccessibilityNodeInfo child = node.getChild(i);
       if (child != null)
         try {
@@ -676,7 +911,7 @@ public final class PhoneAccessibilityService extends AccessibilityService {
   }
 
   private Rect chatTaskBounds(AccessibilityNodeInfo node, int[] count) {
-    if (++count[0] > NODE_LIMIT) return null;
+    if (++count[0] > RECENTS_NODE_LIMIT) return null;
     String text = string(node.getText()), description = string(node.getContentDescription());
     if (node.isVisibleToUser()
         && (text.equals("ChatGPT")
@@ -699,7 +934,7 @@ public final class PhoneAccessibilityService extends AccessibilityService {
         if (candidate != null) candidate.recycle();
       }
     }
-    for (int i = 0; i < node.getChildCount() && count[0] < NODE_LIMIT; i++) {
+    for (int i = 0; i < node.getChildCount() && count[0] < RECENTS_NODE_LIMIT; i++) {
       AccessibilityNodeInfo child = node.getChild(i);
       if (child != null)
         try {
@@ -714,7 +949,6 @@ public final class PhoneAccessibilityService extends AccessibilityService {
 
   private JSONObject restored() throws JSONException {
     return new JSONObject()
-        .put("exitCode", 0)
         .put("returned", true)
         .put("restoredExistingTask", true)
         .put("foregroundPackage", "com.openai.chatgpt");

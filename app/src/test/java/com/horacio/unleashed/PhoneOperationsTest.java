@@ -44,11 +44,11 @@ public class PhoneOperationsTest {
                 return super.action(args);
               }
 
-              public JSONObject readScreen() throws Exception {
+              public JSONObject readScreen(boolean thorough) throws Exception {
                 order.add("first observation");
                 reading.countDown();
                 await(release);
-                return super.readScreen();
+                return super.readScreen(thorough);
               }
 
               public void toolCompleted() {

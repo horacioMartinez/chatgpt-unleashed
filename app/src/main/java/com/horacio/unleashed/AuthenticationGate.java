@@ -190,9 +190,9 @@ public final class AuthenticationGate {
       int seconds, String owner, Probe probe, LongSupplier clock, Sleeper sleeper)
       throws Exception {
     if (seconds < 1 || seconds > 40)
-      throw new IllegalArgumentException("timeoutSeconds must be 1..40");
+      throw new InvalidToolArgumentsException("timeoutSeconds must be 1..40");
     if (!owner.isEmpty() && !owner.matches("[A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)+"))
-      throw new IllegalArgumentException("Invalid expectedPackage");
+      throw new InvalidToolArgumentsException("Invalid expectedPackage");
     long deadline = clock.getAsLong() + seconds * 1000L;
     while (true) {
       if (Thread.currentThread().isInterrupted()) throw new InterruptedException("Wait stopped");

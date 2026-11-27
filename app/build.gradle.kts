@@ -19,8 +19,8 @@ android {
         applicationId = "com.horacio.unleashed"
         minSdk = 30
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.1.2"
+        versionCode = 11
+        versionName = "0.2.2"
     }
     buildFeatures { buildConfig = true }
     signingConfigs {
